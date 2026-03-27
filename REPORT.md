@@ -51,11 +51,32 @@ Prompt: `Show me the scores`
 
 ## Task 2A — Deployed agent
 
-<!-- Paste a short nanobot startup log excerpt showing the gateway started inside Docker -->
+Startup log excerpt from the VM:
+
+```text
+nanobot-1  | Using config: /app/nanobot/config.resolved.json
+nanobot-1  | 🐈 Starting nanobot gateway version 0.1.4.post5 on port 18790...
+nanobot-1  | WebChat channel enabled
+nanobot-1  | MCP server 'lms': connected, 9 tools registered
+nanobot-1  | Agent loop started
+```
 
 ## Task 2B — Web client
 
-<!-- Screenshot of a conversation with the agent in the Flutter web app -->
+Web client deployment checks from the VM:
+
+```text
+HTTP/1.1 200 OK
+Content-Type: text/html; charset=utf-8
+<base href="/flutter/">
+<title>Nanobot</title>
+```
+
+WebSocket conversation transcript:
+
+Prompt: `What labs are available?`
+
+> Available labs: Lab 01 – Products, Architecture & Roles, Lab 02 — Run, Fix, and Deploy a Backend Service, Lab 03 — Backend API: Explore, Debug, Implement, Deploy, Lab 04 — Testing, Front-end, and AI Agents, Lab 05 — Data Pipeline and Analytics Dashboard, Lab 06 — Build Your Own Agent, Lab 07 — Build a Client with an AI Coding Agent, lab-08.
 
 ## Task 3A — Structured logging
 
