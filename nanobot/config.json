@@ -1,0 +1,66 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "./workspace",
+      "model": "coder-model",
+      "provider": "custom",
+      "maxTokens": 8192,
+      "contextWindowTokens": 65536,
+      "temperature": 0.1,
+      "maxToolIterations": 40
+    }
+  },
+  "channels": {
+    "sendProgress": true,
+    "sendToolHints": false
+  },
+  "providers": {
+    "custom": {
+      "apiKey": "my-secret-qwen-key",
+      "apiBase": "http://localhost:42005/v1"
+    }
+  },
+  "gateway": {
+    "host": "0.0.0.0",
+    "port": 18790,
+    "heartbeat": {
+      "enabled": true,
+      "intervalS": 1800
+    }
+  },
+  "tools": {
+    "restrictToWorkspace": true,
+    "exec": {
+      "timeout": 60,
+      "pathAppend": ""
+    },
+    "web": {
+      "proxy": null,
+      "search": {
+        "provider": "brave",
+        "apiKey": "",
+        "baseUrl": "",
+        "maxResults": 5
+      }
+    },
+    "mcpServers": {
+      "lms": {
+        "command": "python",
+        "args": [
+          "-m",
+          "mcp_lms",
+          "http://localhost:42002"
+        ],
+        "env": {
+          "PYTHONPATH": "../mcp",
+          "NANOBOT_LMS_BACKEND_URL": "http://localhost:42002",
+          "NANOBOT_LMS_API_KEY": "2e5a479aaf7a0502b9a645ae8aba39fd3d2f74dfb5dedf59f9415ccc25f158bc"
+        },
+        "toolTimeout": 120,
+        "enabledTools": [
+          "*"
+        ]
+      }
+    }
+  }
+}
