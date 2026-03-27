@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
+import time
 from pathlib import Path
+from urllib.request import urlopen
 
 
 APP_DIR = Path("/app")
@@ -12,6 +16,7 @@ PROJECT_DIR = APP_DIR / "nanobot"
 CONFIG_PATH = PROJECT_DIR / "config.json"
 RESOLVED_CONFIG_PATH = PROJECT_DIR / "config.resolved.json"
 WORKSPACE_PATH = PROJECT_DIR / "workspace"
+FALLBACK_PORT = int(os.environ.get("NANOBOT_FALLBACK_LLM_PORT", "8787"))
 
 
 def _require(name: str) -> str:
@@ -25,15 +30,62 @@ def _require_int(name: str) -> int:
     return int(_require(name))
 
 
+def _start_fallback_llm(
+    *,
+    upstream_base_url: str,
+    upstream_api_key: str,
+    backend_url: str,
+    backend_api_key: str,
+    model: str,
+) -> None:
+    env = os.environ.copy()
+    env["FALLBACK_LLM_HOST"] = "127.0.0.1"
+    env["FALLBACK_LLM_PORT"] = str(FALLBACK_PORT)
+    env["FALLBACK_LLM_UPSTREAM_BASE_URL"] = upstream_base_url
+    env["FALLBACK_LLM_UPSTREAM_API_KEY"] = upstream_api_key
+    env["FALLBACK_LLM_BACKEND_URL"] = backend_url
+    env["FALLBACK_LLM_BACKEND_API_KEY"] = backend_api_key
+    env["FALLBACK_LLM_MODEL"] = model
+
+    subprocess.Popen(
+        [sys.executable, str(PROJECT_DIR / "fallback_llm.py")],
+        env=env,
+    )
+
+    health_url = f"http://127.0.0.1:{FALLBACK_PORT}/health"
+    last_error: Exception | None = None
+    for _ in range(50):
+        try:
+            with urlopen(health_url, timeout=1):
+                return
+        except Exception as exc:  # pragma: no cover - startup loop
+            last_error = exc
+            time.sleep(0.1)
+    raise RuntimeError(f"Fallback LLM did not start: {last_error}")
+
+
 def main() -> None:
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    upstream_base_url = _require("LLM_API_BASE_URL")
+    upstream_api_key = _require("LLM_API_KEY")
+    backend_url = _require("NANOBOT_LMS_BACKEND_URL")
+    backend_api_key = _require("NANOBOT_LMS_API_KEY")
+    model = _require("LLM_API_MODEL")
+
+    _start_fallback_llm(
+        upstream_base_url=upstream_base_url,
+        upstream_api_key=upstream_api_key,
+        backend_url=backend_url,
+        backend_api_key=backend_api_key,
+        model=model,
+    )
 
     config.setdefault("providers", {}).setdefault("custom", {})
-    config["providers"]["custom"]["apiKey"] = _require("LLM_API_KEY")
-    config["providers"]["custom"]["apiBase"] = _require("LLM_API_BASE_URL")
+    config["providers"]["custom"]["apiKey"] = upstream_api_key
+    config["providers"]["custom"]["apiBase"] = f"http://127.0.0.1:{FALLBACK_PORT}/v1"
 
     defaults = config.setdefault("agents", {}).setdefault("defaults", {})
-    defaults["model"] = _require("LLM_API_MODEL")
+    defaults["model"] = model
     defaults["workspace"] = str(WORKSPACE_PATH)
 
     gateway = config.setdefault("gateway", {})
@@ -53,11 +105,11 @@ def main() -> None:
         .setdefault("lms", {})
     )
     mcp_server["command"] = "python"
-    mcp_server["args"] = ["-m", "mcp_lms", _require("NANOBOT_LMS_BACKEND_URL")]
+    mcp_server["args"] = ["-m", "mcp_lms", backend_url]
     mcp_env = mcp_server.setdefault("env", {})
     mcp_env["PYTHONPATH"] = str(APP_DIR / "mcp")
-    mcp_env["NANOBOT_LMS_BACKEND_URL"] = _require("NANOBOT_LMS_BACKEND_URL")
-    mcp_env["NANOBOT_LMS_API_KEY"] = _require("NANOBOT_LMS_API_KEY")
+    mcp_env["NANOBOT_LMS_BACKEND_URL"] = backend_url
+    mcp_env["NANOBOT_LMS_API_KEY"] = backend_api_key
 
     RESOLVED_CONFIG_PATH.write_text(
         json.dumps(config, indent=2, ensure_ascii=False),

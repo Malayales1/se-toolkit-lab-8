@@ -95,6 +95,7 @@ services:
   nanobot:
     build:
       context: ./nanobot
+      network: host
       additional_contexts:
         workspace: .
       args:
@@ -120,6 +121,7 @@ services:
   client-web-flutter:
     build:
       context: ./nanobot-websocket-channel/client-web-flutter
+      network: host
       args:
         REGISTRY_PREFIX_DOCKER_HUB: ${REGISTRY_PREFIX_DOCKER_HUB:-}
         REGISTRY_PREFIX_GHCR: ${REGISTRY_PREFIX_GHCR:-}
