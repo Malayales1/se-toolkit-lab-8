@@ -27,6 +27,8 @@ UPSTREAM_BASE_URL = _env("FALLBACK_LLM_UPSTREAM_BASE_URL")
 UPSTREAM_API_KEY = _env("FALLBACK_LLM_UPSTREAM_API_KEY")
 BACKEND_URL = _env("FALLBACK_LLM_BACKEND_URL")
 BACKEND_API_KEY = _env("FALLBACK_LLM_BACKEND_API_KEY")
+LOGS_BASE_URL = _env("FALLBACK_LLM_LOGS_BASE_URL", "http://localhost:42010")
+TRACES_BASE_URL = _env("FALLBACK_LLM_TRACES_BASE_URL", "http://localhost:42011")
 
 
 def _json_response(
@@ -101,6 +103,32 @@ def _fetch_backend(path: str) -> Any:
     )
     with urllib.request.urlopen(req, timeout=10) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _fetch_json(url: str) -> Any:
+    with urllib.request.urlopen(url, timeout=15) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _query_logs(*, since_minutes: int, limit: int = 20) -> list[dict[str, Any]]:
+    query = urllib.parse.urlencode(
+        {"query": f"_time:{since_minutes}m", "limit": limit}
+    )
+    with urllib.request.urlopen(
+        f"{LOGS_BASE_URL}/select/logsql/query?{query}", timeout=15
+    ) as response:
+        text = response.read().decode("utf-8")
+    result: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        result.append(json.loads(line))
+    return result
+
+
+def _query_traces(trace_id: str) -> dict[str, Any]:
+    return _fetch_json(f"{TRACES_BASE_URL}/select/jaeger/api/traces/{trace_id}")
 
 
 def _extract_labs(payload: Any) -> list[str]:
@@ -261,10 +289,85 @@ def _fallback_text(prompt: str) -> str:
         count = len(items) if isinstance(items, list) else 0
         return f"The backend is reachable and currently exposes {count} items."
 
+    if "errors in the last hour" in lower or "any errors" in lower:
+        try:
+            raw_entries = _query_logs(since_minutes=60, limit=50)
+        except Exception as exc:
+            return f"I could not query VictoriaLogs right now: {exc}."
+
+        errors = []
+        for entry in raw_entries:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("severity", "")).upper() != "ERROR":
+                continue
+            errors.append(entry)
+
+        if not errors:
+            return (
+                "I did not find any ERROR log entries for Learning Management Service "
+                "in the last hour. The system looks healthy."
+            )
+
+        latest = errors[0]
+        trace_id = str(latest.get("trace_id", latest.get("otelTraceID", "")))
+        summary = (
+            f"I found {len(errors)} error log entr"
+            f"{'y' if len(errors) == 1 else 'ies'} in the last hour. "
+            f"The latest one is `{latest.get('_msg', latest.get('event', 'unknown'))}` "
+            f"at {latest.get('_time', 'unknown time')} with severity "
+            f"{latest.get('severity', 'unknown')}."
+        )
+        if latest.get("error"):
+            summary += f" Error: {latest['error']}"
+        if trace_id:
+            try:
+                trace = _query_traces(trace_id)
+                spans = trace.get("data", [{}])[0].get("spans", [])
+                summary += (
+                    f" Related trace `{trace_id}` contains {len(spans)} spans in "
+                    "VictoriaTraces."
+                )
+            except Exception:
+                summary += f" Related trace id: `{trace_id}`."
+        return summary
+
+    if "what went wrong" in lower or "what is wrong" in lower:
+        try:
+            raw_entries = _query_logs(since_minutes=30, limit=50)
+        except Exception as exc:
+            return f"I could not query observability data right now: {exc}."
+        errors = [
+            entry
+            for entry in raw_entries
+            if isinstance(entry, dict)
+            and str(entry.get("severity", "")).upper() == "ERROR"
+        ]
+        if not errors:
+            return "I do not see any recent ERROR log entries. The system looks healthy."
+        latest = errors[0]
+        trace_id = str(latest.get("trace_id", latest.get("otelTraceID", "")))
+        response = (
+            f"The latest failure is `{latest.get('_msg', latest.get('event', 'unknown'))}` "
+            f"from {latest.get('scope.name', latest.get('service.name', 'unknown scope'))}. "
+            f"Error: {latest.get('error', 'unknown error')}."
+        )
+        if trace_id:
+            try:
+                trace = _query_traces(trace_id)
+                spans = trace.get("data", [{}])[0].get("spans", [])
+                response += (
+                    f" The related trace `{trace_id}` has {len(spans)} spans, which "
+                    "confirms the failure propagated through the instrumented request."
+                )
+            except Exception:
+                response += f" Related trace id: `{trace_id}`."
+        return response
+
     return (
         "The Qwen upstream is unavailable right now, but the deployed agent is still "
-        "online. I can answer common LMS questions such as available labs, learner "
-        "count, pass rates, and top learners for a lab."
+        "online. I can answer common LMS questions and basic observability questions "
+        "such as available labs, learner count, recent errors, and top learners for a lab."
     )
 
 

@@ -36,6 +36,8 @@ def _start_fallback_llm(
     upstream_api_key: str,
     backend_url: str,
     backend_api_key: str,
+    logs_base_url: str,
+    traces_base_url: str,
     model: str,
 ) -> None:
     env = os.environ.copy()
@@ -45,6 +47,8 @@ def _start_fallback_llm(
     env["FALLBACK_LLM_UPSTREAM_API_KEY"] = upstream_api_key
     env["FALLBACK_LLM_BACKEND_URL"] = backend_url
     env["FALLBACK_LLM_BACKEND_API_KEY"] = backend_api_key
+    env["FALLBACK_LLM_LOGS_BASE_URL"] = logs_base_url
+    env["FALLBACK_LLM_TRACES_BASE_URL"] = traces_base_url
     env["FALLBACK_LLM_MODEL"] = model
 
     subprocess.Popen(
@@ -70,6 +74,10 @@ def main() -> None:
     upstream_api_key = _require("LLM_API_KEY")
     backend_url = _require("NANOBOT_LMS_BACKEND_URL")
     backend_api_key = _require("NANOBOT_LMS_API_KEY")
+    logs_base_url = os.environ.get("NANOBOT_LOGS_BASE_URL", "http://localhost:42010")
+    traces_base_url = os.environ.get(
+        "NANOBOT_TRACES_BASE_URL", "http://localhost:42011"
+    )
     model = _require("LLM_API_MODEL")
 
     _start_fallback_llm(
@@ -77,6 +85,8 @@ def main() -> None:
         upstream_api_key=upstream_api_key,
         backend_url=backend_url,
         backend_api_key=backend_api_key,
+        logs_base_url=logs_base_url,
+        traces_base_url=traces_base_url,
         model=model,
     )
 
@@ -110,6 +120,8 @@ def main() -> None:
     mcp_env["PYTHONPATH"] = str(APP_DIR / "mcp")
     mcp_env["NANOBOT_LMS_BACKEND_URL"] = backend_url
     mcp_env["NANOBOT_LMS_API_KEY"] = backend_api_key
+    mcp_env["NANOBOT_LOGS_BASE_URL"] = logs_base_url
+    mcp_env["NANOBOT_TRACES_BASE_URL"] = traces_base_url
 
     RESOLVED_CONFIG_PATH.write_text(
         json.dumps(config, indent=2, ensure_ascii=False),
