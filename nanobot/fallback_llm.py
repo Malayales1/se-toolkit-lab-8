@@ -565,6 +565,9 @@ class _Handler(BaseHTTPRequestHandler):
         }
         if "cron" in tool_names:
             if (
+                not lower.strip().startswith("check system health")
+                and not lower.strip().startswith("stop the health check")
+                and
                 any(word in lower for word in ("create", "schedule"))
                 and "health" in lower
                 and "check" in lower
