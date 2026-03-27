@@ -332,6 +332,40 @@ def _fallback_text(prompt: str) -> str:
                 )
                 return f"Top learners for {lab}: {preview}."
 
+    if "check system health" in lower:
+        try:
+            raw_entries = _query_logs(since_minutes=2, limit=20)
+        except Exception as exc:
+            return f"I could not query observability data right now: {exc}."
+        errors = [
+            entry
+            for entry in raw_entries
+            if isinstance(entry, dict)
+            and str(entry.get("severity", "")).upper() == "ERROR"
+        ]
+        if not errors:
+            return "I checked the recent logs and there are no fresh backend errors. The system looks healthy right now."
+        latest = errors[0]
+        trace_id = str(latest.get("trace_id", latest.get("otelTraceID", "")))
+        response = (
+            "I checked the last 2 minutes of logs. "
+            f"The newest error is `{latest.get('_msg', latest.get('event', 'unknown'))}` "
+            f"from {latest.get('scope.name', latest.get('service.name', 'unknown scope'))}. "
+        )
+        if latest.get("error"):
+            response += f"Error: {latest['error']}."
+        if trace_id:
+            try:
+                trace = _query_traces(trace_id)
+                spans = trace.get("data", [{}])[0].get("spans", [])
+                response += (
+                    f" Related trace `{trace_id}` has {len(spans)} spans, so the "
+                    "failure is visible in the traced request path."
+                )
+            except Exception:
+                response += f" Related trace id: `{trace_id}`."
+        return response
+
     if "health" in lower or "status" in lower:
         try:
             items = _fetch_backend("/items/")
