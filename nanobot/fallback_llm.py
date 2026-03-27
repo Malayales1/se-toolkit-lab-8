@@ -11,6 +11,7 @@ import json
 import os
 import re
 import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -69,6 +70,23 @@ def _latest_user_message(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _latest_tool_message(messages: list[dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        if message.get("role") == "tool":
+            return _extract_text(message.get("content", ""))
+    return ""
+
+
+def _find_last_job_id(messages: list[dict[str, Any]]) -> str | None:
+    pattern = re.compile(r"\bid:\s*([a-z0-9-]+)\b", flags=re.IGNORECASE)
+    for message in reversed(messages):
+        text = _extract_text(message.get("content", ""))
+        match = pattern.search(text)
+        if match:
+            return match.group(1)
+    return None
+
+
 def _openai_text_response(text: str, *, model: str) -> dict[str, Any]:
     return {
         "id": f"chatcmpl-fallback-{int(time.time() * 1000)}",
@@ -87,6 +105,39 @@ def _openai_text_response(text: str, *, model: str) -> dict[str, Any]:
             "completion_tokens": max(1, len(text) // 4),
             "total_tokens": max(1, len(text) // 4),
         },
+    }
+
+
+def _openai_tool_call_response(
+    tool_name: str, arguments: dict[str, Any], *, model: str
+) -> dict[str, Any]:
+    tool_call_id = f"call_{uuid.uuid4().hex[:12]}"
+    return {
+        "id": f"chatcmpl-fallback-{int(time.time() * 1000)}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": tool_call_id,
+                            "type": "function",
+                            "function": {
+                                "name": tool_name,
+                                "arguments": json.dumps(arguments),
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
 
 
@@ -451,7 +502,71 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         messages = body.get("messages", [])
-        prompt = _latest_user_message(messages) if isinstance(messages, list) else ""
+        if not isinstance(messages, list):
+            messages = []
+
+        if messages and messages[-1].get("role") == "tool":
+            answer = _latest_tool_message(messages) or "Done."
+            payload = _openai_text_response(answer, model=body.get("model", MODEL))
+            _json_response(self, 200, payload)
+            return
+
+        prompt = _latest_user_message(messages)
+        lower = prompt.lower()
+        tools = body.get("tools", [])
+        tool_names = {
+            tool.get("function", {}).get("name")
+            for tool in tools
+            if isinstance(tool, dict)
+        }
+        if "cron" in tool_names:
+            if (
+                any(word in lower for word in ("create", "start", "schedule"))
+                and "health" in lower
+                and "check" in lower
+            ):
+                interval = (
+                    900
+                    if "15 minute" in lower or "15-minute" in lower or "15 min" in lower
+                    else 120
+                )
+                payload = _openai_tool_call_response(
+                    "cron",
+                    {
+                        "action": "add",
+                        "message": (
+                            "Check system health for this chat. Review backend errors "
+                            "from the last 2 minutes, inspect a trace if needed, and "
+                            "post a short summary. If there are no recent errors, say "
+                            "the system looks healthy."
+                        ),
+                        "every_seconds": interval,
+                    },
+                    model=body.get("model", MODEL),
+                )
+                _json_response(self, 200, payload)
+                return
+            if "list" in lower and any(
+                word in lower for word in ("job", "jobs", "check", "checks", "cron")
+            ):
+                payload = _openai_tool_call_response(
+                    "cron",
+                    {"action": "list"},
+                    model=body.get("model", MODEL),
+                )
+                _json_response(self, 200, payload)
+                return
+            if any(word in lower for word in ("remove", "delete", "stop", "cancel")):
+                job_id = _find_last_job_id(messages)
+                if job_id:
+                    payload = _openai_tool_call_response(
+                        "cron",
+                        {"action": "remove", "job_id": job_id},
+                        model=body.get("model", MODEL),
+                    )
+                    _json_response(self, 200, payload)
+                    return
+
         answer = _fallback_text(prompt)
         payload = _openai_text_response(answer, model=body.get("model", MODEL))
         _json_response(self, 200, payload)
