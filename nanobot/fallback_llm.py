@@ -81,6 +81,8 @@ def _find_last_job_id(messages: list[dict[str, Any]]) -> str | None:
     pattern = re.compile(r"\bid:\s*([a-z0-9-]+)\b", flags=re.IGNORECASE)
     for message in reversed(messages):
         text = _extract_text(message.get("content", ""))
+        if "Scheduled jobs" not in text and "Created job" not in text:
+            continue
         match = pattern.search(text)
         if match:
             return match.group(1)
@@ -176,6 +178,14 @@ def _query_logs(*, since_minutes: int, limit: int = 20) -> list[dict[str, Any]]:
             continue
         result.append(json.loads(line))
     return result
+
+
+def _sort_logs_latest_first(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        entries,
+        key=lambda entry: str(entry.get("_time", "")),
+        reverse=True,
+    )
 
 
 def _query_traces(trace_id: str) -> dict[str, Any]:
@@ -334,15 +344,15 @@ def _fallback_text(prompt: str) -> str:
 
     if "check system health" in lower:
         try:
-            raw_entries = _query_logs(since_minutes=2, limit=20)
+            raw_entries = _query_logs(since_minutes=2, limit=200)
         except Exception as exc:
             return f"I could not query observability data right now: {exc}."
-        errors = [
+        errors = _sort_logs_latest_first([
             entry
             for entry in raw_entries
             if isinstance(entry, dict)
             and str(entry.get("severity", "")).upper() == "ERROR"
-        ]
+        ])
         if not errors:
             return "I checked the recent logs and there are no fresh backend errors. The system looks healthy right now."
         latest = errors[0]
@@ -376,12 +386,12 @@ def _fallback_text(prompt: str) -> str:
 
     if "errors in the last hour" in lower or "any errors" in lower:
         try:
-            raw_entries = _query_logs(since_minutes=60, limit=50)
+            raw_entries = _query_logs(since_minutes=60, limit=500)
         except Exception as exc:
             return f"I could not query VictoriaLogs right now: {exc}."
 
         errors = []
-        for entry in raw_entries:
+        for entry in _sort_logs_latest_first(raw_entries):
             if not isinstance(entry, dict):
                 continue
             if str(entry.get("severity", "")).upper() != "ERROR":
@@ -419,15 +429,15 @@ def _fallback_text(prompt: str) -> str:
 
     if "what went wrong" in lower or "what is wrong" in lower:
         try:
-            raw_entries = _query_logs(since_minutes=30, limit=50)
+            raw_entries = _query_logs(since_minutes=30, limit=500)
         except Exception as exc:
             return f"I could not query observability data right now: {exc}."
-        errors = [
+        errors = _sort_logs_latest_first([
             entry
             for entry in raw_entries
             if isinstance(entry, dict)
             and str(entry.get("severity", "")).upper() == "ERROR"
-        ]
+        ])
         if not errors:
             return "I do not see any recent ERROR log entries. The system looks healthy."
         latest = errors[0]
@@ -555,9 +565,10 @@ class _Handler(BaseHTTPRequestHandler):
         }
         if "cron" in tool_names:
             if (
-                any(word in lower for word in ("create", "start", "schedule"))
+                any(word in lower for word in ("create", "schedule"))
                 and "health" in lower
                 and "check" in lower
+                and any(word in lower for word in ("every", "minute", "minutes", "recurring", "in this chat"))
             ):
                 interval = (
                     900
