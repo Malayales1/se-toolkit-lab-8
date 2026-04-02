@@ -14,8 +14,10 @@ from mcp.types import TextContent, Tool
 from pydantic import BaseModel, Field
 
 from mcp_lms.client import LMSClient
+from mcp_lms.client import ObservabilityClient
 
 _base_url: str = ""
+_observability_client: ObservabilityClient | None = None
 
 server = Server("lms")
 
@@ -36,6 +38,42 @@ class _TopLearnersQuery(_LabQuery):
     limit: int = Field(
         default=5, ge=1, description="Max learners to return (default 5)."
     )
+
+
+class _LogsSearchQuery(BaseModel):
+    keyword: str = Field(default="", description="Keyword to search for in logs.")
+    service: str = Field(
+        default="Learning Management Service",
+        description="Service name to filter by.",
+    )
+    severity: str = Field(
+        default="",
+        description="Optional severity filter, e.g. ERROR or INFO.",
+    )
+    since_minutes: int = Field(default=60, ge=1, le=1440)
+    limit: int = Field(default=10, ge=1, le=100)
+
+
+class _LogsErrorCountQuery(BaseModel):
+    service: str = Field(
+        default="Learning Management Service",
+        description="Optional service filter.",
+    )
+    since_minutes: int = Field(default=60, ge=1, le=1440)
+    limit: int = Field(default=200, ge=1, le=1000)
+
+
+class _TracesListQuery(BaseModel):
+    service: str = Field(
+        default="Learning Management Service",
+        description="Service name to inspect.",
+    )
+    limit: int = Field(default=10, ge=1, le=50)
+    lookback: str = Field(default="1h", description="Jaeger lookback window, e.g. 1h.")
+
+
+class _TraceGetQuery(BaseModel):
+    trace_id: str = Field(description="Trace identifier returned by traces_list or logs.")
 
 
 # ---------------------------------------------------------------------------
@@ -61,12 +99,23 @@ def _client() -> LMSClient:
     return LMSClient(_base_url, _resolve_api_key())
 
 
-def _text(data: BaseModel | Sequence[BaseModel]) -> list[TextContent]:
-    """Serialize a pydantic model (or list of models) to a JSON text block."""
+def _obs() -> ObservabilityClient:
+    global _observability_client
+    if _observability_client is None:
+        _observability_client = ObservabilityClient()
+    return _observability_client
+
+
+def _text(data: Any) -> list[TextContent]:
+    """Serialize pydantic models or plain JSON-like values to a text block."""
     if isinstance(data, BaseModel):
         payload = data.model_dump()
-    else:
+    elif isinstance(data, Sequence) and data and all(
+        isinstance(item, BaseModel) for item in data
+    ):
         payload = [item.model_dump() for item in data]
+    else:
+        payload = data
     return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
 
 
@@ -110,6 +159,42 @@ async def _completion_rate(args: _LabQuery) -> list[TextContent]:
 
 async def _sync_pipeline(_args: _NoArgs) -> list[TextContent]:
     return _text(await _client().sync_pipeline())
+
+
+async def _logs_search(args: _LogsSearchQuery) -> list[TextContent]:
+    return _text(
+        await _obs().logs_search(
+            keyword=args.keyword,
+            service=args.service,
+            severity=args.severity,
+            since_minutes=args.since_minutes,
+            limit=args.limit,
+        )
+    )
+
+
+async def _logs_error_count(args: _LogsErrorCountQuery) -> list[TextContent]:
+    return _text(
+        await _obs().logs_error_count(
+            service=args.service,
+            since_minutes=args.since_minutes,
+            limit=args.limit,
+        )
+    )
+
+
+async def _traces_list(args: _TracesListQuery) -> list[TextContent]:
+    return _text(
+        await _obs().traces_list(
+            service=args.service,
+            limit=args.limit,
+            lookback=args.lookback,
+        )
+    )
+
+
+async def _traces_get(args: _TraceGetQuery) -> list[TextContent]:
+    return _text(await _obs().traces_get(args.trace_id))
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +268,30 @@ _register(
     "Trigger the LMS sync pipeline. May take a moment.",
     _NoArgs,
     _sync_pipeline,
+)
+_register(
+    "logs_search",
+    "Search recent structured logs by keyword, severity, service, and time range.",
+    _LogsSearchQuery,
+    _logs_search,
+)
+_register(
+    "logs_error_count",
+    "Count recent ERROR logs per service over a time window.",
+    _LogsErrorCountQuery,
+    _logs_error_count,
+)
+_register(
+    "traces_list",
+    "List recent traces for a service from VictoriaTraces.",
+    _TracesListQuery,
+    _traces_list,
+)
+_register(
+    "traces_get",
+    "Fetch a full trace by trace ID from VictoriaTraces.",
+    _TraceGetQuery,
+    _traces_get,
 )
 
 
