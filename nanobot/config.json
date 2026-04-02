@@ -60,7 +60,9 @@
         "env": {
           "PYTHONPATH": "../mcp",
           "NANOBOT_LMS_BACKEND_URL": "http://localhost:42002",
-          "NANOBOT_LMS_API_KEY": "2e5a479aaf7a0502b9a645ae8aba39fd3d2f74dfb5dedf59f9415ccc25f158bc"
+          "NANOBOT_LMS_API_KEY": "2e5a479aaf7a0502b9a645ae8aba39fd3d2f74dfb5dedf59f9415ccc25f158bc",
+          "NANOBOT_LOGS_BASE_URL": "http://localhost:42010",
+          "NANOBOT_TRACES_BASE_URL": "http://localhost:42011"
         },
         "toolTimeout": 120,
         "enabledTools": [
