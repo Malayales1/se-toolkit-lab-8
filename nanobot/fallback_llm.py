@@ -11,6 +11,7 @@ import json
 import os
 import re
 import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -69,6 +70,25 @@ def _latest_user_message(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _latest_tool_message(messages: list[dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        if message.get("role") == "tool":
+            return _extract_text(message.get("content", ""))
+    return ""
+
+
+def _find_last_job_id(messages: list[dict[str, Any]]) -> str | None:
+    pattern = re.compile(r"\bid:\s*([a-z0-9-]+)\b", flags=re.IGNORECASE)
+    for message in reversed(messages):
+        text = _extract_text(message.get("content", ""))
+        if "Scheduled jobs" not in text and "Created job" not in text:
+            continue
+        match = pattern.search(text)
+        if match:
+            return match.group(1)
+    return None
+
+
 def _openai_text_response(text: str, *, model: str) -> dict[str, Any]:
     return {
         "id": f"chatcmpl-fallback-{int(time.time() * 1000)}",
@@ -87,6 +107,39 @@ def _openai_text_response(text: str, *, model: str) -> dict[str, Any]:
             "completion_tokens": max(1, len(text) // 4),
             "total_tokens": max(1, len(text) // 4),
         },
+    }
+
+
+def _openai_tool_call_response(
+    tool_name: str, arguments: dict[str, Any], *, model: str
+) -> dict[str, Any]:
+    tool_call_id = f"call_{uuid.uuid4().hex[:12]}"
+    return {
+        "id": f"chatcmpl-fallback-{int(time.time() * 1000)}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": tool_call_id,
+                            "type": "function",
+                            "function": {
+                                "name": tool_name,
+                                "arguments": json.dumps(arguments),
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
 
 
@@ -125,6 +178,14 @@ def _query_logs(*, since_minutes: int, limit: int = 20) -> list[dict[str, Any]]:
             continue
         result.append(json.loads(line))
     return result
+
+
+def _sort_logs_latest_first(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        entries,
+        key=lambda entry: str(entry.get("_time", "")),
+        reverse=True,
+    )
 
 
 def _query_traces(trace_id: str) -> dict[str, Any]:
@@ -281,6 +342,40 @@ def _fallback_text(prompt: str) -> str:
                 )
                 return f"Top learners for {lab}: {preview}."
 
+    if "check system health" in lower:
+        try:
+            raw_entries = _query_logs(since_minutes=2, limit=200)
+        except Exception as exc:
+            return f"I could not query observability data right now: {exc}."
+        errors = _sort_logs_latest_first([
+            entry
+            for entry in raw_entries
+            if isinstance(entry, dict)
+            and str(entry.get("severity", "")).upper() == "ERROR"
+        ])
+        if not errors:
+            return "I checked the recent logs and there are no fresh backend errors. The system looks healthy right now."
+        latest = errors[0]
+        trace_id = str(latest.get("trace_id", latest.get("otelTraceID", "")))
+        response = (
+            "I checked the last 2 minutes of logs. "
+            f"The newest error is `{latest.get('_msg', latest.get('event', 'unknown'))}` "
+            f"from {latest.get('scope.name', latest.get('service.name', 'unknown scope'))}. "
+        )
+        if latest.get("error"):
+            response += f"Error: {latest['error']}."
+        if trace_id:
+            try:
+                trace = _query_traces(trace_id)
+                spans = trace.get("data", [{}])[0].get("spans", [])
+                response += (
+                    f" Related trace `{trace_id}` has {len(spans)} spans, so the "
+                    "failure is visible in the traced request path."
+                )
+            except Exception:
+                response += f" Related trace id: `{trace_id}`."
+        return response
+
     if "health" in lower or "status" in lower:
         try:
             items = _fetch_backend("/items/")
@@ -291,12 +386,12 @@ def _fallback_text(prompt: str) -> str:
 
     if "errors in the last hour" in lower or "any errors" in lower:
         try:
-            raw_entries = _query_logs(since_minutes=60, limit=50)
+            raw_entries = _query_logs(since_minutes=60, limit=500)
         except Exception as exc:
             return f"I could not query VictoriaLogs right now: {exc}."
 
         errors = []
-        for entry in raw_entries:
+        for entry in _sort_logs_latest_first(raw_entries):
             if not isinstance(entry, dict):
                 continue
             if str(entry.get("severity", "")).upper() != "ERROR":
@@ -334,15 +429,15 @@ def _fallback_text(prompt: str) -> str:
 
     if "what went wrong" in lower or "what is wrong" in lower:
         try:
-            raw_entries = _query_logs(since_minutes=30, limit=50)
+            raw_entries = _query_logs(since_minutes=30, limit=500)
         except Exception as exc:
             return f"I could not query observability data right now: {exc}."
-        errors = [
+        errors = _sort_logs_latest_first([
             entry
             for entry in raw_entries
             if isinstance(entry, dict)
             and str(entry.get("severity", "")).upper() == "ERROR"
-        ]
+        ])
         if not errors:
             return "I do not see any recent ERROR log entries. The system looks healthy."
         latest = errors[0]
@@ -451,7 +546,75 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         messages = body.get("messages", [])
-        prompt = _latest_user_message(messages) if isinstance(messages, list) else ""
+        if not isinstance(messages, list):
+            messages = []
+
+        if messages and messages[-1].get("role") == "tool":
+            answer = _latest_tool_message(messages) or "Done."
+            payload = _openai_text_response(answer, model=body.get("model", MODEL))
+            _json_response(self, 200, payload)
+            return
+
+        prompt = _latest_user_message(messages)
+        lower = prompt.lower()
+        tools = body.get("tools", [])
+        tool_names = {
+            tool.get("function", {}).get("name")
+            for tool in tools
+            if isinstance(tool, dict)
+        }
+        if "cron" in tool_names:
+            if (
+                not lower.strip().startswith("check system health")
+                and not lower.strip().startswith("stop the health check")
+                and
+                any(word in lower for word in ("create", "schedule"))
+                and "health" in lower
+                and "check" in lower
+                and any(word in lower for word in ("every", "minute", "minutes", "recurring", "in this chat"))
+            ):
+                interval = (
+                    900
+                    if "15 minute" in lower or "15-minute" in lower or "15 min" in lower
+                    else 120
+                )
+                payload = _openai_tool_call_response(
+                    "cron",
+                    {
+                        "action": "add",
+                        "message": (
+                            "Check system health for this chat. Review backend errors "
+                            "from the last 2 minutes, inspect a trace if needed, and "
+                            "post a short summary. If there are no recent errors, say "
+                            "the system looks healthy."
+                        ),
+                        "every_seconds": interval,
+                    },
+                    model=body.get("model", MODEL),
+                )
+                _json_response(self, 200, payload)
+                return
+            if "list" in lower and any(
+                word in lower for word in ("job", "jobs", "check", "checks", "cron")
+            ):
+                payload = _openai_tool_call_response(
+                    "cron",
+                    {"action": "list"},
+                    model=body.get("model", MODEL),
+                )
+                _json_response(self, 200, payload)
+                return
+            if any(word in lower for word in ("remove", "delete", "stop", "cancel")):
+                job_id = _find_last_job_id(messages)
+                if job_id:
+                    payload = _openai_tool_call_response(
+                        "cron",
+                        {"action": "remove", "job_id": job_id},
+                        model=body.get("model", MODEL),
+                    )
+                    _json_response(self, 200, payload)
+                    return
+
         answer = _fallback_text(prompt)
         payload = _openai_text_response(answer, model=body.get("model", MODEL))
         _json_response(self, 200, payload)
