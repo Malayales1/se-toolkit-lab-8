@@ -11,7 +11,7 @@
 > [!IMPORTANT]
 > Do the whole lab on your **VM**. You can work through a plain SSH shell or through `VS Code` Remote-SSH. When this guide says `localhost`, it means the VM itself or a forwarded port from that VM. Do not install or run `nanobot` on your main machine.
 
-## What you will learn
+## What you will learn.
 
 By the end of this lab, you should be able to say:
 
